@@ -141,6 +141,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         .footer { background: #f9f9f9; padding: 20px 30px; text-align: center; color: #666; font-size: 13px; }
         .error-msg { color: #dc2626; padding: 10px; background: #fef2f2; border-radius: 6px; margin-bottom: 10px; display: none; }
         .error-msg.show { display: block; }
+        .file-name { color: #48bb78; font-weight: 600; margin-top: 10px; font-size: 14px; }
+        .success-msg { color: #22863a; padding: 12px; background: #f0fdf4; border-radius: 6px; margin-bottom: 10px; display: none; border-left: 4px solid #48bb78; }
+        .success-msg.show { display: block; }
     </style>
 </head>
 <body>
@@ -169,6 +172,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                             <label for="pdfFile" class="upload-btn">📂 בחר קובץ PDF</label>
                         </div>
                         <div class="upload-text">או גרור קובץ PDF לכאן</div>
+                        <div class="file-name" id="fileName"></div>
                     </div>
                 </div>
                 
@@ -181,8 +185,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     </div>
                 </div>
                 
+                <div class="success-msg" id="successMsg"></div>
                 <button type="submit" class="process-btn" id="processBtn">
-                    ✨ הוסף מספרים והורד PDF
+                    ✨ הוסף מספרים והורד PDF ממוספר
                 </button>
             </form>
         </div>
@@ -193,6 +198,19 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     </div>
 
     <script>
+        // Display file name when selected
+        document.getElementById('pdfFile').addEventListener('change', (e) => {
+            const fileName = e.target.files[0]?.name;
+            const fileNameEl = document.getElementById('fileName');
+            if (fileName) {
+                fileNameEl.textContent = '✅ הקובץ הועלה: ' + fileName;
+            } else {
+                fileNameEl.textContent = '';
+            }
+            document.getElementById('errorMsg').classList.remove('show');
+            document.getElementById('successMsg').classList.remove('show');
+        });
+        
         document.getElementById('uploadForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             
@@ -201,9 +219,14 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             formData.append('pdf', file);
             formData.append('design', '2');
             
+            const processBtn = document.getElementById('processBtn');
+            const originalText = processBtn.textContent;
+            
             document.getElementById('progress').classList.add('active');
             document.getElementById('processBtn').disabled = true;
+            document.getElementById('processBtn').textContent = '⏳ עיבוד...';
             document.getElementById('errorMsg').classList.remove('show');
+            document.getElementById('successMsg').classList.remove('show');
             
             try {
                 const response = await fetch('/process', {
@@ -212,6 +235,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 });
                 
                 if (response.ok) {
+                    document.getElementById('processBtn').textContent = '✅ הושלם!';
                     const blob = await response.blob();
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
@@ -221,15 +245,27 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     a.click();
                     document.body.removeChild(a);
                     URL.revokeObjectURL(url);
+                    
+                    // Show success message
+                    showSuccess('PDF ממוספר הורד בהצלחה! 📥');
+                    
+                    // Reset button after 2 seconds
+                    setTimeout(() => {
+                        document.getElementById('processBtn').textContent = originalText;
+                        document.getElementById('processBtn').disabled = false;
+                    }, 2000);
                 } else {
                     const error = await response.json();
                     showError(error.error || 'שגיאה בעיבוד PDF');
+                    document.getElementById('processBtn').textContent = originalText;
+                    document.getElementById('processBtn').disabled = false;
                 }
             } catch (error) {
                 showError('שגיאה בשרתון: ' + error.message);
+                document.getElementById('processBtn').textContent = originalText;
+                document.getElementById('processBtn').disabled = false;
             } finally {
                 document.getElementById('progress').classList.remove('active');
-                document.getElementById('processBtn').disabled = false;
             }
         });
         
@@ -237,6 +273,12 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             const errorEl = document.getElementById('errorMsg');
             errorEl.textContent = msg;
             errorEl.classList.add('show');
+        }
+        
+        function showSuccess(msg) {
+            const successEl = document.getElementById('successMsg');
+            successEl.textContent = msg;
+            successEl.classList.add('show');
         }
         
         // Drag and drop
