@@ -1,14 +1,16 @@
 from flask import Flask, render_template_string, request, send_file, jsonify
-from werkzeug.utils import secure_filename
 import PyPDF2
 from reportlab.pdfgen import canvas
-from io import BytesIO
+from PyPDF2 import PdfReader, PdfWriter
+import io
 import os
+import logging
+
+logging.basicConfig(level=logging.DEBUG)
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 
-# Design 2 coordinates
 DESIGN_COORDINATES = {
     "2": {
         "1": [{"number": 1, "x": 2602.67, "y": 493.67}, {"number": 2, "x": 829.67, "y": 514.67}],
@@ -136,6 +138,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         .progress-bar { width: 100%; height: 6px; background: #e0e0e0; border-radius: 3px; margin-top: 10px; }
         .progress-fill { height: 100%; background: linear-gradient(90deg, #667eea 0%, #48bb78 100%); width: 0%; transition: width 0.3s; }
         .footer { background: #f9f9f9; padding: 20px 30px; text-align: center; color: #666; font-size: 13px; }
+        .error-msg { color: #dc2626; padding: 10px; background: #fef2f2; border-radius: 6px; margin-bottom: 10px; display: none; }
+        .error-msg.show { display: block; }
     </style>
 </head>
 <body>
@@ -157,6 +161,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             <form id="uploadForm" enctype="multipart/form-data">
                 <div class="section">
                     <div class="section-title">📁 העלה את ה-PDF</div>
+                    <div class="error-msg" id="errorMsg"></div>
                     <div class="file-upload-section">
                         <div class="file-input-wrapper">
                             <input type="file" id="pdfFile" name="pdf" accept=".pdf" required>
@@ -197,6 +202,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             
             document.getElementById('progress').classList.add('active');
             document.getElementById('processBtn').disabled = true;
+            document.getElementById('errorMsg').classList.remove('show');
             
             try {
                 const response = await fetch('/process', {
@@ -215,15 +221,22 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     document.body.removeChild(a);
                     URL.revokeObjectURL(url);
                 } else {
-                    alert('שגיאה בעיבוד PDF');
+                    const error = await response.json();
+                    showError(error.error || 'שגיאה בעיבוד PDF');
                 }
             } catch (error) {
-                alert('שגיאה בשרתון');
+                showError('שגיאה בשרתון: ' + error.message);
             } finally {
                 document.getElementById('progress').classList.remove('active');
                 document.getElementById('processBtn').disabled = false;
             }
         });
+        
+        function showError(msg) {
+            const errorEl = document.getElementById('errorMsg');
+            errorEl.textContent = msg;
+            errorEl.classList.add('show');
+        }
         
         // Drag and drop
         const uploadSection = document.querySelector('.file-upload-section');
@@ -255,19 +268,20 @@ def index():
 
 @app.route('/process', methods=['POST'])
 def process_pdf():
-    if 'pdf' not in request.files:
-        return jsonify({'error': 'No file'}), 400
-    
-    file = request.files['pdf']
-    design = request.form.get('design', '2')
-    
-    if not file or file.filename == '':
-        return jsonify({'error': 'No selected file'}), 400
-    
     try:
+        if 'pdf' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        
+        file = request.files['pdf']
+        design = request.form.get('design', '2')
+        
+        if not file or file.filename == '':
+            return jsonify({'error': 'No selected file'}), 400
+        
         # Read PDF
-        pdf_reader = PyPDF2.PdfReader(file)
-        pdf_writer = PyPDF2.PdfWriter()
+        file_content = file.read()
+        pdf_reader = PdfReader(io.BytesIO(file_content))
+        pdf_writer = PdfWriter()
         
         coordinates = DESIGN_COORDINATES.get(design, {})
         
@@ -278,52 +292,55 @@ def process_pdf():
             # Add numbers to page if coordinates exist
             if page_key in coordinates:
                 # Create overlay with numbers
-                overlay = BytesIO()
+                overlay_buffer = io.BytesIO()
                 page_width = float(page.mediabox.width)
                 page_height = float(page.mediabox.height)
                 
-                c = canvas.Canvas(overlay, pagesize=(page_width, page_height))
+                c = canvas.Canvas(overlay_buffer, pagesize=(page_width, page_height))
                 
                 for coord in coordinates[page_key]:
                     x = coord['x']
                     y = page_height - coord['y']
                     number = str(coord['number'])
                     
-                    # Draw circle
+                    # Draw circle background
                     c.setLineWidth(0)
                     c.setFillColor(0, 0, 0)
                     c.circle(x, y, 25, fill=1)
                     
-                    # Draw number
+                    # Draw white number
                     c.setFillColor(1, 1, 1)
                     c.setFont("Helvetica-Bold", 20)
                     c.drawCentredString(x, y - 6, number)
                 
                 c.save()
-                overlay.seek(0)
+                overlay_buffer.seek(0)
                 
                 # Merge overlay with page
-                overlay_pdf = PyPDF2.PdfReader(overlay)
+                overlay_pdf = PdfReader(overlay_buffer)
                 overlay_page = overlay_pdf.pages[0]
                 page.merge_page(overlay_page)
             
             pdf_writer.add_page(page)
         
         # Return PDF
-        output = BytesIO()
-        pdf_writer.write(output)
-        output.seek(0)
+        output_buffer = io.BytesIO()
+        pdf_writer.write(output_buffer)
+        output_buffer.seek(0)
         
         return send_file(
-            output,
+            output_buffer,
             mimetype='application/pdf',
             as_attachment=True,
             download_name='wedding_numbered.pdf'
         )
     
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        import traceback
+        app.logger.error(f"Error processing PDF: {str(e)}")
+        app.logger.error(traceback.format_exc())
+        return jsonify({'error': f'Error: {str(e)}'}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(debug=False, host='0.0.0.0', port=port)
