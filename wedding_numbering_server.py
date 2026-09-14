@@ -1,6 +1,7 @@
 from flask import Flask, render_template_string, request, send_file, jsonify
 import PyPDF2
 from reportlab.pdfgen import canvas
+from reportlab.lib.colors import black, white
 from PyPDF2 import PdfReader, PdfWriter
 import io
 import os
@@ -305,11 +306,11 @@ def process_pdf():
                     
                     # Draw circle background
                     c.setLineWidth(0)
-                    c.setFillColor(0, 0, 0)
+                    c.setFillColor(black)
                     c.circle(x, y, 25, fill=1)
                     
                     # Draw white number
-                    c.setFillColor(1, 1, 1)
+                    c.setFillColor(white)
                     c.setFont("Helvetica-Bold", 20)
                     c.drawCentredString(x, y - 6, number)
                 
