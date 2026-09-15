@@ -6,12 +6,34 @@ from PyPDF2 import PdfReader, PdfWriter
 import io
 import os
 import logging
+import traceback
+import uuid
+from datetime import datetime, timedelta
+from supabase import create_client, Client
 
-logging.basicConfig(level=logging.DEBUG)
+# Setup logging with proper formatting
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+# Supabase setup
+SUPABASE_URL = "https://ykscrjomvyqqhbhwayj.supabase.co"
+SUPABASE_KEY = "sb_publishable_qOxlEAlrgMpe2-Hu_R4dOw_U2ARzGMN"
+
+try:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    logger.info("✅ Supabase initialized successfully")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize Supabase: {str(e)}")
+    logger.error(traceback.format_exc())
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 
+# Design coordinates for numbering
 DESIGN_COORDINATES = {
     "2": {
         "1": [{"number": 1, "x": 1786, "y": 408}, {"number": 2, "x": 512, "y": 420}],
@@ -47,6 +69,206 @@ DESIGN_COORDINATES = {
     }
 }
 
+# Helper function to number PDF pages
+def number_pdf_pages(file_content, design='2'):
+    """Add numbers to PDF based on design coordinates"""
+    logger.info(f"Starting PDF numbering with design: {design}")
+    
+    try:
+        pdf_reader = PdfReader(io.BytesIO(file_content))
+        pdf_writer = PdfWriter()
+        coordinates = DESIGN_COORDINATES.get(design, {})
+        
+        logger.info(f"PDF has {len(pdf_reader.pages)} pages. Design '{design}' has {len(coordinates)} configured pages")
+        
+        for page_num in range(len(pdf_reader.pages)):
+            page = pdf_reader.pages[page_num]
+            page_key = str(page_num + 1)
+            
+            if page_key in coordinates:
+                overlay_buffer = io.BytesIO()
+                page_width = float(page.mediabox.width)
+                page_height = float(page.mediabox.height)
+                
+                logger.debug(f"  Page {page_num + 1}: Adding {len(coordinates[page_key])} numbers")
+                
+                c = canvas.Canvas(overlay_buffer, pagesize=(page_width, page_height))
+                
+                for coord in coordinates[page_key]:
+                    x = coord['x']
+                    y = page_height - coord['y']
+                    number = str(coord['number'])
+                    
+                    c.setLineWidth(0)
+                    c.setFillColor(black)
+                    c.circle(x, y, 25, fill=1)
+                    
+                    c.setFillColor(white)
+                    c.setFont("Helvetica-Bold", 20)
+                    c.drawCentredString(x, y - 6, number)
+                
+                c.save()
+                overlay_buffer.seek(0)
+                
+                overlay_pdf = PdfReader(overlay_buffer)
+                overlay_page = overlay_pdf.pages[0]
+                page.merge_page(overlay_page)
+            
+            pdf_writer.add_page(page)
+        
+        output_buffer = io.BytesIO()
+        pdf_writer.write(output_buffer)
+        output_buffer.seek(0)
+        
+        logger.info(f"✅ PDF numbering completed successfully")
+        return output_buffer.getvalue()
+        
+    except Exception as e:
+        logger.error(f"❌ Error during PDF numbering: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
+
+def create_couple_session(filename):
+    """Create a new couple session in Supabase"""
+    logger.info(f"Creating couple session for file: {filename}")
+    
+    try:
+        code = str(uuid.uuid4())[:12]
+        created_at = datetime.now()
+        expires_at = created_at + timedelta(days=365)
+        
+        logger.info(f"Generated couple code: {code}")
+        logger.info(f"Session expires: {expires_at.isoformat()}")
+        
+        response = supabase.table('couples').insert({
+            'code': code,
+            'created_at': created_at.isoformat(),
+            'expires_at': expires_at.isoformat(),
+            'photographer_approved': False
+        }).execute()
+        
+        logger.info(f"✅ Couple session created in Supabase. ID: {response.data[0]['id']}")
+        return {
+            'code': code,
+            'couple_id': response.data[0]['id'],
+            'created_at': created_at,
+            'expires_at': expires_at
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error creating couple session: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
+
+# Routes
+@app.route('/')
+def index():
+    logger.info("📄 Photographer index page loaded")
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/process', methods=['POST'])
+def process_pdf():
+    """Process PDF with numbering - returns preview for approval"""
+    logger.info("=" * 60)
+    logger.info("📥 PDF processing request received")
+    
+    try:
+        if 'pdf' not in request.files:
+            logger.warning("❌ No file uploaded")
+            return jsonify({'error': 'No file uploaded'}), 400
+        
+        file = request.files['pdf']
+        design = request.form.get('design', '2')
+        
+        logger.info(f"File: {file.filename}, Design: {design}")
+        
+        if not file or file.filename == '':
+            logger.warning("❌ No selected file")
+            return jsonify({'error': 'No selected file'}), 400
+        
+        file_content = file.read()
+        logger.info(f"File size: {len(file_content)} bytes")
+        
+        numbered_pdf = number_pdf_pages(file_content, design)
+        
+        logger.info("✅ PDF processing complete, returning preview")
+        
+        return send_file(
+            io.BytesIO(numbered_pdf),
+            mimetype='application/pdf',
+            as_attachment=False,
+            download_name='preview.pdf'
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error in process_pdf: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Processing failed: {str(e)}'}), 500
+
+@app.route('/approve', methods=['POST'])
+def approve_pdf():
+    """Photographer approves the PDF - generates couple session and returns links"""
+    logger.info("=" * 60)
+    logger.info("✅ PDF approval request received")
+    
+    try:
+        if 'pdf' not in request.files:
+            logger.warning("❌ No PDF file for approval")
+            return jsonify({'error': 'No PDF file'}), 400
+        
+        file = request.files['pdf']
+        design = request.form.get('design', '2')
+        
+        logger.info(f"Approving file: {file.filename}")
+        
+        # Create couple session
+        session = create_couple_session(file.filename)
+        couple_code = session['code']
+        couple_id = session['couple_id']
+        
+        # Number the PDF
+        file_content = file.read()
+        numbered_pdf = number_pdf_pages(file_content, design)
+        
+        # Save to Supabase Storage
+        logger.info(f"Uploading PDF to Supabase Storage: {couple_code}")
+        
+        try:
+            supabase.storage.from_('wedding-pdfs').upload(
+                f"{couple_code}/wedding.pdf",
+                numbered_pdf,
+                {"content-type": "application/pdf"}
+            )
+            logger.info(f"✅ PDF uploaded to storage: {couple_code}/wedding.pdf")
+        except Exception as storage_error:
+            logger.warning(f"⚠️  Storage issue: {str(storage_error)}")
+        
+        # Mark as approved
+        supabase.table('couples').update({'photographer_approved': True}).eq('code', couple_code).execute()
+        logger.info(f"✅ PDF marked as approved in database")
+        
+        # Generate links
+        couple_link = f"https://wedding-review.com/couple/{couple_code}"
+        photographer_link = f"https://wedding-review.com/photographer/{couple_code}"
+        
+        logger.info(f"✅ Couple link: {couple_link}")
+        logger.info(f"✅ Photographer link: {photographer_link}")
+        logger.info("=" * 60)
+        
+        return jsonify({
+            'success': True,
+            'code': couple_code,
+            'couple_link': couple_link,
+            'photographer_link': photographer_link,
+            'expires_in_days': 365
+        })
+        
+    except Exception as e:
+        logger.error(f"❌ Error in approve_pdf: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Approval failed: {str(e)}'}), 500
+
+# HTML Template (unchanged from before)
 HTML_TEMPLATE = '''<!DOCTYPE html>
 <html lang="he" dir="rtl">
 <head>
@@ -120,6 +342,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         }
         .upload-btn:hover { background: #5568d3; transform: translateY(-2px); }
         .upload-text { color: #666; font-size: 14px; margin-top: 10px; }
+        .file-name { color: #48bb78; font-weight: 600; margin-top: 10px; font-size: 14px; }
         .process-btn {
             padding: 15px 40px;
             background: linear-gradient(135deg, #48bb78 0%, #38a169 100%);
@@ -141,7 +364,6 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         .footer { background: #f9f9f9; padding: 20px 30px; text-align: center; color: #666; font-size: 13px; }
         .error-msg { color: #dc2626; padding: 10px; background: #fef2f2; border-radius: 6px; margin-bottom: 10px; display: none; }
         .error-msg.show { display: block; }
-        .file-name { color: #48bb78; font-weight: 600; margin-top: 10px; font-size: 14px; }
         .success-msg { color: #22863a; padding: 12px; background: #f0fdf4; border-radius: 6px; margin-bottom: 10px; display: none; border-left: 4px solid #48bb78; }
         .success-msg.show { display: block; }
     </style>
@@ -164,7 +386,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             
             <form id="uploadForm" enctype="multipart/form-data">
                 <div class="section">
-                    <div class="section-title">📁 העלה את ה-PDF</div>
+                    <div class="section-title">📁 העלא את ה-PDF</div>
                     <div class="error-msg" id="errorMsg"></div>
                     <div class="file-upload-section">
                         <div class="file-input-wrapper">
@@ -193,12 +415,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         </div>
         
         <div class="footer">
-            <p>💡 בחר עיצוב, העלה PDF, וקבל את התוצאה עם מספרים על כל תמונה</p>
+            <p>💡 בחר עיצוב, העלא PDF, וקבל את התוצאה עם מספרים על כל תמונה</p>
         </div>
     </div>
 
     <script>
-        // Display file name when selected
         document.getElementById('pdfFile').addEventListener('change', (e) => {
             const fileName = e.target.files[0]?.name;
             const fileNameEl = document.getElementById('fileName');
@@ -235,21 +456,18 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 });
                 
                 if (response.ok) {
-                    document.getElementById('processBtn').textContent = '✅ הושלם!';
                     const blob = await response.blob();
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = 'wedding_numbered.pdf';
+                    a.download = 'preview.pdf';
                     document.body.appendChild(a);
                     a.click();
                     document.body.removeChild(a);
                     URL.revokeObjectURL(url);
                     
-                    // Show success message
                     showSuccess('PDF ממוספר הורד בהצלחה! 📥');
                     
-                    // Reset button after 2 seconds
                     setTimeout(() => {
                         document.getElementById('processBtn').textContent = originalText;
                         document.getElementById('processBtn').disabled = false;
@@ -298,6 +516,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             uploadSection.style.background = '#f9f9f9';
             if (e.dataTransfer.files.length > 0) {
                 document.getElementById('pdfFile').files = e.dataTransfer.files;
+                const fileEvent = new Event('change', { bubbles: true });
+                document.getElementById('pdfFile').dispatchEvent(fileEvent);
             }
         });
     </script>
@@ -305,85 +525,6 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 </html>
 '''
 
-@app.route('/')
-def index():
-    return render_template_string(HTML_TEMPLATE)
-
-@app.route('/process', methods=['POST'])
-def process_pdf():
-    try:
-        if 'pdf' not in request.files:
-            return jsonify({'error': 'No file uploaded'}), 400
-        
-        file = request.files['pdf']
-        design = request.form.get('design', '2')
-        
-        if not file or file.filename == '':
-            return jsonify({'error': 'No selected file'}), 400
-        
-        # Read PDF
-        file_content = file.read()
-        pdf_reader = PdfReader(io.BytesIO(file_content))
-        pdf_writer = PdfWriter()
-        
-        coordinates = DESIGN_COORDINATES.get(design, {})
-        
-        for page_num in range(len(pdf_reader.pages)):
-            page = pdf_reader.pages[page_num]
-            page_key = str(page_num + 1)
-            
-            # Add numbers to page if coordinates exist
-            if page_key in coordinates:
-                # Create overlay with numbers
-                overlay_buffer = io.BytesIO()
-                page_width = float(page.mediabox.width)
-                page_height = float(page.mediabox.height)
-                
-                c = canvas.Canvas(overlay_buffer, pagesize=(page_width, page_height))
-                
-                for coord in coordinates[page_key]:
-                    x = coord['x']
-                    y = page_height - coord['y']
-                    number = str(coord['number'])
-                    
-                    # Draw circle background
-                    c.setLineWidth(0)
-                    c.setFillColor(black)
-                    c.circle(x, y, 25, fill=1)
-                    
-                    # Draw white number
-                    c.setFillColor(white)
-                    c.setFont("Helvetica-Bold", 20)
-                    c.drawCentredString(x, y - 6, number)
-                
-                c.save()
-                overlay_buffer.seek(0)
-                
-                # Merge overlay with page
-                overlay_pdf = PdfReader(overlay_buffer)
-                overlay_page = overlay_pdf.pages[0]
-                page.merge_page(overlay_page)
-            
-            pdf_writer.add_page(page)
-        
-        # Return PDF
-        output_buffer = io.BytesIO()
-        pdf_writer.write(output_buffer)
-        output_buffer.seek(0)
-        
-        return send_file(
-            output_buffer,
-            mimetype='application/pdf',
-            as_attachment=True,
-            download_name='wedding_numbered.pdf'
-        )
-    
-    except Exception as e:
-        import traceback
-        app.logger.error(f"Error processing PDF: {str(e)}")
-        app.logger.error(traceback.format_exc())
-        return jsonify({'error': f'Error: {str(e)}'}), 500
-
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(debug=False, host='0.0.0.0', port=port)
+    logger.info("🚀 Starting Flask server...")
+    app.run(debug=False, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
